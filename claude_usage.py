@@ -51,23 +51,34 @@ def fetch_usage(token: str):
 
 
 def trigger_refresh() -> None:
-    """Invoke `claude --version` so Claude Code refreshes the access token in
-    ~/.claude/.credentials.json on our behalf. Safer than refreshing ourselves
-    (avoids racing on the file and on refresh-token rotation)."""
-    print("info: token expired, running `claude --version` to refresh...", file=sys.stderr)
+    """Launch `claude` interactively in ~/.claude for ~20s so Claude Code
+    refreshes the access token in ~/.claude/.credentials.json on our behalf.
+    `claude --version` does not refresh the token, so we need a real session.
+    Safer than refreshing ourselves (avoids racing on the file and on
+    refresh-token rotation)."""
+    print("info: token expired, launching `claude` for 20s to refresh...", file=sys.stderr)
+    cwd = Path.home() / ".claude"
     try:
-        subprocess.run(
-            ["claude", "--version"],
-            check=True,
-            capture_output=True,
-            timeout=30,
+        proc = subprocess.Popen(
+            ["claude"],
+            cwd=str(cwd),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
         )
     except FileNotFoundError:
         sys.exit("error: --autorefresh needs `claude` on PATH; pass --no-autorefresh to skip")
-    except subprocess.TimeoutExpired:
-        sys.exit("error: `claude --version` timed out during refresh")
-    except subprocess.CalledProcessError as e:
-        sys.exit(f"error: `claude --version` failed (exit {e.returncode}): {e.stderr.decode(errors='replace')[:300]}")
+
+    try:
+        time.sleep(20)
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait(timeout=5)
 
 
 def main() -> None:
@@ -87,7 +98,7 @@ def main() -> None:
         "--autorefresh",
         action=argparse.BooleanOptionalAction,
         default=True,
-        help="if the token is expired or returns 401, run `claude --version` to refresh it and retry once (default: enabled)",
+        help="if the token is expired or returns 401, briefly launch `claude` to refresh it and retry once (default: enabled)",
     )
     args = p.parse_args()
 
