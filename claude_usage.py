@@ -14,11 +14,14 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
+from platformdirs import user_cache_dir
+
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 DEFAULT_CREDS = Path.home() / ".claude" / ".credentials.json"
-CACHE_DIR = Path(os.environ.get("XDG_CACHE_HOME", str(Path.home() / ".cache"))) / "claude_usage"
+CACHE_DIR = Path(user_cache_dir("claude_usage"))
 CACHE_FILE = CACHE_DIR / "usage.json"
 DEFAULT_CACHE_TTL = 300  # 5 minutes
+DEFAULT_STALE_WARN = 3600  # past this age, the stale-cache warning is louder
 
 
 def fmt_duration(seconds) -> str:
@@ -85,9 +88,10 @@ def load_creds(path: Path) -> dict:
 def fetch_usage(token: str):
     """Return (status, payload, retry_after).
 
-    status is the HTTP code. payload is parsed JSON on 2xx, otherwise the raw
-    response body string. retry_after is an int (seconds) parsed from the
-    Retry-After header on 429, otherwise None.
+    status is the HTTP code, or None on network failure. payload is parsed JSON
+    on 2xx, otherwise the raw response body string (or the network error
+    reason when status is None). retry_after is an int (seconds) parsed from
+    the Retry-After header on 429, otherwise None.
     """
     req = urllib.request.Request(
         USAGE_URL,
@@ -112,7 +116,7 @@ def fetch_usage(token: str):
                     retry_after = None
         return e.code, e.read().decode("utf-8", errors="replace")[:500], retry_after
     except urllib.error.URLError as e:
-        sys.exit(f"error: network failure: {e.reason}")
+        return None, f"network failure: {e.reason}", None
 
 
 def trigger_refresh() -> None:
@@ -169,7 +173,13 @@ def main() -> None:
         "--cache-ttl",
         type=int,
         default=DEFAULT_CACHE_TTL,
-        help=f"seconds to reuse a cached response before re-fetching (default: {DEFAULT_CACHE_TTL}, 0 disables fresh-read). The /api/oauth/usage endpoint is rate-limited per token; caching avoids burning quota when called from a status bar / shell prompt. On 429, a stale cache (if present) is served instead of erroring.",
+        help=f"seconds to reuse a cached response before re-fetching (default: {DEFAULT_CACHE_TTL}, 0 disables fresh-read). The /api/oauth/usage endpoint is rate-limited per token; caching avoids burning quota when called from a status bar / shell prompt. On any fetch failure (429, 5xx, network), a stale cache (if present) is served instead of erroring.",
+    )
+    p.add_argument(
+        "--stale-warn",
+        type=int,
+        default=DEFAULT_STALE_WARN,
+        help=f"when serving a stale cache as fallback, emit a louder warning if the cached payload is older than this many seconds (default: {DEFAULT_STALE_WARN}).",
     )
     args = p.parse_args()
 
@@ -200,21 +210,27 @@ def main() -> None:
             oauth = load_creds(creds_path)
             expires_in = expires_in_seconds(oauth)
             status, payload, retry_after = fetch_usage(oauth["accessToken"])
-        if status == 429:
-            retry_msg = f" (retry after {fmt_duration(retry_after)})" if retry_after else ""
-            stale = load_stale_cache()
-            if stale is not None:
-                payload, age = stale
-                print(
-                    f"warning: rate limited{retry_msg}; serving stale cached response ({fmt_duration(age)} old)",
-                    file=sys.stderr,
-                )
-            else:
-                sys.exit(f"error: HTTP 429 from {USAGE_URL}{retry_msg} and no cache available")
-        elif status != 200:
-            sys.exit(f"error: HTTP {status} from {USAGE_URL}: {payload}")
-        else:
+
+        if status == 200:
             save_cache(payload)
+        else:
+            if status == 429:
+                retry_msg = f" (retry after {fmt_duration(retry_after)})" if retry_after else ""
+                reason = f"rate limited{retry_msg}"
+            elif status is None:
+                reason = str(payload)
+            else:
+                reason = f"HTTP {status} from {USAGE_URL}: {payload}"
+
+            stale = load_stale_cache()
+            if stale is None:
+                sys.exit(f"error: {reason} and no cache available")
+            payload, age = stale
+            tag = "WARNING" if age > args.stale_warn else "warning"
+            print(
+                f"{tag}: {reason}; serving stale cached response ({fmt_duration(age)} old)",
+                file=sys.stderr,
+            )
 
     if args.include_token_meta:
         payload = dict(payload)
