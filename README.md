@@ -12,7 +12,8 @@ as you're logged into Claude Code on this machine.
 
 ## Requirements
 
-- Python 3.7+ (stdlib only — no `pip install` needed)
+- Python 3.7+
+- [`platformdirs`](https://pypi.org/project/platformdirs/) (`pip install platformdirs`) for resolving the cache directory
 - A working Claude Code login on this machine (i.e. `~/.claude/.credentials.json`
   exists and contains a valid `claudeAiOauth.accessToken`)
 - A Claude.ai subscription (Pro/Max/Team). The endpoint does not work with a
@@ -54,6 +55,9 @@ python claude_usage.py --no-autorefresh
 
 # Change the local cache TTL (default 300s, 0 to always re-fetch)
 python claude_usage.py --cache-ttl 60
+
+# Threshold past which stale-cache fallback uses a louder warning (default 3600s)
+python claude_usage.py --stale-warn 900
 ```
 
 ### Example output
@@ -113,13 +117,15 @@ The script:
 
 1. Reads `~/.claude/.credentials.json` and pulls out
    `claudeAiOauth.accessToken`.
-2. If the `expiresAt` timestamp is in the past, prints a warning to **stderr**
-   but still attempts the request.
+2. If the `expiresAt` timestamp is in the past, refreshes the token first
+   (see [Auto-refresh](#auto-refresh)); with `--no-autorefresh` it just prints
+   a warning to **stderr** and attempts the request anyway.
 3. Sends `GET https://api.anthropic.com/api/oauth/usage` with these headers:
    - `Authorization: Bearer <token>`
    - `anthropic-beta: oauth-2025-04-20`
    - `User-Agent: claude-cli/...`
-4. Prints the JSON response to stdout.
+4. Prints the JSON response to stdout (or a stale cached response on any
+   fetch failure, see [Caching and rate limits](#caching-and-rate-limits)).
 
 The `--include-token-meta` flag adds a `_local` key containing
 `subscriptionType`, `rateLimitTier`, and `expires_in_seconds` from your local
@@ -131,9 +137,10 @@ By default (`--autorefresh`, on), the script will:
 
 1. Detect that the access token in `~/.claude/.credentials.json` is expired,
    **or** receive a 401 from the API.
-2. Shell out to `claude --version`, which causes Claude Code itself to refresh
-   the access token using the stored refresh token and write the new token
-   back to the credentials file.
+2. Launch `claude` in the background for ~20 seconds and then terminate it.
+   Starting a real Claude Code session causes it to refresh the access token
+   using the stored refresh token and write the new token back to the
+   credentials file. (`claude --version` does **not** trigger a refresh.)
 3. Re-read the credentials file and retry the request once.
 
 Why delegate to `claude` instead of refreshing the token ourselves?
@@ -153,20 +160,27 @@ if you want the script to fail fast on 401 for monitoring purposes).
 `/api/oauth/usage` is rate-limited per token. Calling it on a tight loop (tmux
 status bar, shell prompt, watch loop, while testing) will trip the limit and
 lock you out for up to an hour. To avoid this, the script keeps a small local
-cache at `~/.cache/claude_usage/usage.json` (respects `XDG_CACHE_HOME`):
+cache under the platform's user cache directory (resolved via
+[`platformdirs`](https://pypi.org/project/platformdirs/), so on Linux this
+honours `XDG_CACHE_HOME` and is typically `~/.cache/claude_usage/usage.json`):
 
 - On every run, if the cache is younger than `--cache-ttl` seconds (default
   300, i.e. 5 minutes), the cached response is returned without hitting the
   API.
 - On a successful fetch, the cache is overwritten.
-- On a `429 Too Many Requests`, the script prints the `Retry-After` window to
-  stderr and falls back to the stale cache if one exists, so status bars keep
-  working through a rate-limit window. If no cache exists, it exits with code
-  1 and the retry-after info.
+- On **any** fetch failure (`429 Too Many Requests`, other non-2xx HTTP
+  responses, network errors), the script falls back to the stale cache if one
+  exists and prints the cached payload to stdout with a warning on stderr, so
+  status bars keep working through outages and rate-limit windows. If no cache
+  exists, it exits with code 1.
+- The stale-fallback warning is prefixed `warning:` if the cache is fresher
+  than `--stale-warn` seconds (default 3600), and the louder `WARNING:`
+  otherwise, so monitoring tools can distinguish "briefly stale" from
+  "dangerously stale".
 
 Use `--cache-ttl 0` if you need the freshest possible value and accept the
 risk of getting rate limited. The cache is still written on success so the
-429 fallback remains available.
+failure-time fallback remains available.
 
 ## Limitations
 
@@ -180,8 +194,8 @@ risk of getting rate limited. The cache is still written on success so the
 
 | Code | Meaning |
 |------|---------|
-| 0    | Success |
-| 1    | Network error or non-2xx HTTP response |
+| 0    | Success (fresh response, served cache, or stale-cache fallback after a failed fetch) |
+| 1    | Fetch failed (network error or non-2xx HTTP response) **and** no cache available to fall back on |
 | 2    | Credentials file missing or malformed |
 
 ## Related
