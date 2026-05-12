@@ -21,6 +21,18 @@ CACHE_FILE = CACHE_DIR / "usage.json"
 DEFAULT_CACHE_TTL = 300  # 5 minutes
 
 
+def fmt_duration(seconds) -> str:
+    """Format a duration in seconds as e.g. '51m', '2h05m', or '30s'."""
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m = rem // 60
+    if h > 0:
+        return f"{h}h{m:02d}m"
+    if m > 0:
+        return f"{m}m"
+    return f"{seconds}s"
+
+
 def load_cache(max_age: int):
     """Return cached payload if fresh (mtime within max_age seconds), else None."""
     if max_age <= 0 or not CACHE_FILE.is_file():
@@ -189,12 +201,12 @@ def main() -> None:
             expires_in = expires_in_seconds(oauth)
             status, payload, retry_after = fetch_usage(oauth["accessToken"])
         if status == 429:
-            retry_msg = f" (retry after {retry_after}s)" if retry_after else ""
+            retry_msg = f" (retry after {fmt_duration(retry_after)})" if retry_after else ""
             stale = load_stale_cache()
             if stale is not None:
                 payload, age = stale
                 print(
-                    f"warning: rate limited{retry_msg}; serving stale cached response ({int(age)}s old)",
+                    f"warning: rate limited{retry_msg}; serving stale cached response ({fmt_duration(age)} old)",
                     file=sys.stderr,
                 )
             else:
