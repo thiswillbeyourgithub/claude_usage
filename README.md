@@ -51,6 +51,9 @@ CLAUDE_CREDENTIALS=/path/to/.credentials.json python claude_usage.py
 
 # Disable auto-refresh of expired tokens (see "Auto-refresh" below)
 python claude_usage.py --no-autorefresh
+
+# Change the local cache TTL (default 300s, 0 to always re-fetch)
+python claude_usage.py --cache-ttl 60
 ```
 
 ### Example output
@@ -144,6 +147,26 @@ Why delegate to `claude` instead of refreshing the token ourselves?
 
 Pass `--no-autorefresh` to disable this (e.g. if `claude` is not on PATH, or
 if you want the script to fail fast on 401 for monitoring purposes).
+
+## Caching and rate limits
+
+`/api/oauth/usage` is rate-limited per token. Calling it on a tight loop (tmux
+status bar, shell prompt, watch loop, while testing) will trip the limit and
+lock you out for up to an hour. To avoid this, the script keeps a small local
+cache at `~/.cache/claude_usage/usage.json` (respects `XDG_CACHE_HOME`):
+
+- On every run, if the cache is younger than `--cache-ttl` seconds (default
+  300, i.e. 5 minutes), the cached response is returned without hitting the
+  API.
+- On a successful fetch, the cache is overwritten.
+- On a `429 Too Many Requests`, the script prints the `Retry-After` window to
+  stderr and falls back to the stale cache if one exists, so status bars keep
+  working through a rate-limit window. If no cache exists, it exits with code
+  1 and the retry-after info.
+
+Use `--cache-ttl 0` if you need the freshest possible value and accept the
+risk of getting rate limited. The cache is still written on success so the
+429 fallback remains available.
 
 ## Limitations
 
